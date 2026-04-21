@@ -198,114 +198,22 @@ generate_uinitrd() {
     ls -hl *"${kernel_version}" 2>/dev/null
 }
 
-
-# Build and install ahci_dwc_fbs.ko inside the chroot (native ARM64 build)
-# The module registers "snps,dwc-ahci-fbs" and enables FIS-Based Switching
-# by reading GPARAM2R.FBS_SUP from the DWC AHCI hardware parameter register.
-build_ahci_fbs_module() {
-    local module_src="/root/ahci-fbs-module"
-    [[ -d "${module_src}" ]] || {
-        echo -e "${WARNING} ahci-fbs-module source not found in chroot, skipping FBS module build"
+# Run depmod inside chroot for the FBS module pre-installed by the host build step.
+# The .ko was already injected into /lib/modules/<ver>/extra/ before chroot ran;
+# we only need depmod to update modules.dep so the initramfs generator and
+# modprobe can find it. autoload and initramfs-tools/modules were also set by host.
+run_depmod_for_fbs() {
+    local ko_path
+    ko_path="$(find /lib/modules -name "ahci_dwc_fbs.ko" 2>/dev/null | head -1)"
+    if [[ -z "${ko_path}" ]]; then
+        echo -e "${NOTE} ahci_dwc_fbs.ko not found — FBS module was not built on host"
         return
-    }
-    echo -e "${STEPS} Building ahci_dwc_fbs.ko (FIS-Based Switching module)..."
-
-    # Find the installed kernel headers (may be version-stamped)
-    local headers_dir
-    headers_dir="$(ls -d /usr/src/linux-headers-* 2>/dev/null | sort -V | tail -1)"
-    [[ -z "${headers_dir}" ]] && {
-        echo -e "${WARNING} No kernel headers found, skipping module build"
-        return
-    }
+    fi
     local kernel_ver
-    kernel_ver="$(basename "${headers_dir}" | sed 's/linux-headers-//')"
-    make -C "${headers_dir}" scripts HOSTCC=gcc
-    echo -e "${INFO} Building against headers: ${headers_dir} (${kernel_ver})"
-
-
-    cd "${module_src}"
-    # Use -C to point to the exact headers dir; M= is our source tree.
-    # No CROSS_COMPILE or ARCH needed — we are already native ARM64.
-    make -C "${headers_dir}" M="$(pwd)" modules
-    if [[ ! -f "ahci_dwc_fbs.ko" ]]; then
-        echo -e "${WARNING} ahci_dwc_fbs.ko build failed — FBS module will not be included"
-        cd /root
-        return
-    fi
-    echo -e "${SUCCESS} ahci_dwc_fbs.ko compiled successfully"
-
-    # Install into the modules tree so depmod and initramfs pick it up
-    local modules_dir="/lib/modules/${kernel_ver}"
-    install -D -m 644 ahci_dwc_fbs.ko "${modules_dir}/extra/ahci_dwc_fbs.ko"
+    kernel_ver="$(echo "${ko_path}" | awk -F'/' '{print $4}')"
+    echo -e "${INFO} Running depmod for FBS module (kernel ${kernel_ver})..."
     depmod -a "${kernel_ver}"
-    echo -e "${INFO} Module installed to ${modules_dir}/extra/"
-
-    # Load early via systemd-modules-load (user-space, after root mount)
-    echo "ahci_dwc_fbs" >/etc/modules-load.d/ahci-dwc-fbs.conf
-
-    # Also add to initramfs-tools so it is included in the initrd image
-    # (guarantees the module is available if SATA is needed before root mount)
-    grep -q "ahci_dwc_fbs" /etc/initramfs-tools/modules 2>/dev/null ||
-        echo "ahci_dwc_fbs" >>/etc/initramfs-tools/modules
-
-    echo -e "${SUCCESS} FBS module set up for auto-load"
-    cd /root
-}
-
-# Patch all rk3568 SATA DTB nodes to use "snps,dwc-ahci-fbs" only.
-#
-# WHY only the FBS compatible, not the fallback "snps,dwc-ahci":
-#   The built-in ahci_dwc driver registers "snps,dwc-ahci" during early
-#   device_initcall. If we leave that compatible in the DTB, the built-in
-#   claims the device before our module has a chance to load, and the device
-#   is never offered to our module. Using only "snps,dwc-ahci-fbs" causes
-#   the device probe to be deferred (no built-in driver matches), and our
-#   loadable module wins when systemd-modules-load runs.
-patch_sata_dtbs() {
-    echo -e "${STEPS} Patching RK35xx SATA DTBs for FBS-compatible driver binding..."
-
-    apt-get install -y device-tree-compiler 2>/dev/null
-    if ! which dtc >/dev/null 2>&1; then
-        echo -e "${WARNING} dtc not available — skipping DTB patch"
-        return
-    fi
-
-    local dtb_dir="/boot/dtb"
-    local patched=0
-
-    for dtb in "${dtb_dir}"/rk35*.dtb; do
-        [[ -f "${dtb}" ]] || continue
-
-        # Decompile to DTS
-        dtc -q -I dtb -O dts "${dtb}" -o /tmp/_patch_work.dts 2>/dev/null || continue
-
-        # Only process files that contain the target compatible string
-        if grep -q '"snps,dwc-ahci"' /tmp/_patch_work.dts; then
-            # Replace bare "snps,dwc-ahci" with "snps,dwc-ahci-fbs" (no fallback).
-            # Also handles the case where it already appears alongside another string.
-            sed -i \
-                -e '''s/compatible = "snps,dwc-ahci-fbs", "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g''' \
-                -e '''s/compatible = "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g''' \
-                /tmp/_patch_work.dts
-
-            # Recompile back to DTB
-            if dtc -q -I dts -O dtb /tmp/_patch_work.dts -o "${dtb}" 2>/dev/null; then
-                echo -e "${INFO} Patched SATA compatible in: ${dtb##*/}"
-                ((patched++))
-            else
-                echo -e "${WARNING} Failed to recompile ${dtb##*/} — restoring original"
-                # Restore from a copy made before patching (dtc fails gracefully)
-            fi
-        fi
-    done
-
-    rm -f /tmp/_patch_work.dts
-
-    if [[ "${patched}" -gt 0 ]]; then
-        echo -e "${SUCCESS} ${patched} DTB file(s) patched for FBS driver binding"
-    else
-        echo -e "${WARNING} No rk35xx DTBs with snps,dwc-ahci found in ${dtb_dir}"
-    fi
+    echo -e "${SUCCESS} depmod complete — ahci_dwc_fbs.ko is registered"
 }
 
 #================================== Main Execution ==================================
@@ -320,11 +228,9 @@ check_dependencies
 add_scripts
 # 4. Install DEBs if specified
 [[ "${debs_platform}" =~ ^(amlogic|allwinner|rockchip)$ ]] && install_debs
-# 5. Build and install ahci_dwc_fbs FBS module
-build_ahci_fbs_module
-# 6. Patch SATA DTBs for FBS-compatible driver binding
-patch_sata_dtbs
-# 7. Generate images (must run last so initramfs includes our module)
+# 5. Register FBS module that was pre-built and injected by the host
+run_depmod_for_fbs
+# 6. Generate images (initramfs picks up ahci_dwc_fbs from initramfs-tools/modules)
 generate_uinitrd
 
 echo -e "${SUCCESS} Chroot task finished. Exiting..."

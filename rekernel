@@ -366,18 +366,6 @@ chroot_fnnas() {
     cp -f "${script_path}/chroot_fnnas.sh" "${tmp_fnnas}/root/"
     chmod +x "${tmp_fnnas}/root/chroot_fnnas.sh"
 
-    # Copy ahci_dwc_fbs module source into chroot for native ARM64 compilation.
-    # The module registers "snps,dwc-ahci-fbs" and enables FIS-Based Switching
-    # by reading the DWC AHCI GPARAM2R.FBS_SUP hardware parameter register.
-    local module_src_dir="${current_path}/ahci-fbs-module"
-    if [[ -d "${module_src_dir}" ]]; then
-        echo -e "${INFO} Copying ahci-fbs-module source into chroot..."
-        mkdir -p "${tmp_fnnas}/root/ahci-fbs-module"
-        cp -f "${module_src_dir}/"* "${tmp_fnnas}/root/ahci-fbs-module/"
-    else
-        echo -e "${WARNING} ahci-fbs-module directory not found at [ ${module_src_dir} ] — FBS module will not be built"
-    fi
-
     # Copy additional deb packages if a platform is specified
     if [[ "${debs_install}" =~ ^(amlogic|allwinner|rockchip)$ ]]; then
         echo -e "${INFO} Preparing to install additional deb packages for platform: [ ${debs_install} ]..."
@@ -407,6 +395,11 @@ chroot_fnnas() {
 
     # Register trap to ensure unmount happens even if script is interrupted
     trap unmount_fnnas EXIT
+
+    # Build FBS module on host and inject into mounted image before chroot runs,
+    # so the initramfs generation inside chroot picks up the new module.
+    build_fbs_module_host
+    patch_sata_dtbs_host
 
     echo -e "${INFO} Entering chroot to generate kernel artifacts..."
     chroot "${tmp_fnnas}" /bin/bash -c "/root/chroot_fnnas.sh ${debs_install}"
@@ -485,6 +478,176 @@ clean_tmp() {
     trap - EXIT
     # Unmount fnnas base image
     unmount_fnnas
+}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Build ahci_dwc_fbs.ko on the HOST (Ubuntu 24.04, x86_64) via
+# cross-compilation, then inject the result directly into the mounted image.
+#
+# Why host-side, not inside chroot:
+#   The fnnas chroot is Debian 12 (glibc 2.36), but the kernel headers
+#   package ships an arm64 `scripts/mod/modpost` binary that was linked
+#   against glibc 2.38 (Ubuntu 24.04). Running modpost inside the chroot
+#   fails with "GLIBC_2.38 not found". The Actions runner is Ubuntu 24.04
+#   and can cross-compile for arm64 without that constraint; we replace
+#   the arm64 modpost with a shell stub that only creates the required
+#   .mod.c skeleton (symbol validation is harmless to skip because
+#   CONFIG_MODVERSIONS=n in this kernel).
+# ──────────────────────────────────────────────────────────────────────────
+build_fbs_module_host() {
+    local module_src="${current_path}/ahci-fbs-module"
+    if [[ ! -d "${module_src}" ]]; then
+        echo -e "${WARNING} ahci-fbs-module/ not found — skipping FBS module"
+        return
+    fi
+
+    echo -e "${STEPS} Building ahci_dwc_fbs.ko on host (cross arm64)..."
+
+    # ── Detect kernel version from the headers deb (available before chroot) ──
+    # Extract just the deb's control/data to a temp dir to read the version.
+    local headers_deb
+    headers_deb="$(ls "${fnnas_debs}/${debs_install}/"*headers*.deb 2>/dev/null | head -1)"
+    if [[ -z "${headers_deb}" ]]; then
+        echo -e "${WARNING} No headers deb found in ${fnnas_debs}/${debs_install}/ — skipping FBS module"
+        return
+    fi
+
+    # ── Extract the headers deb to a host-writable temp dir ──
+    local host_headers
+    host_headers="$(mktemp -d /tmp/fnnas-headers-XXXXXX)"
+    echo -e "${INFO} Extracting headers from ${headers_deb##*/} ..."
+    dpkg-deb -x "${headers_deb}" "${host_headers}"
+
+    local kernel_ver
+    kernel_ver="$(ls "${host_headers}/usr/src/" 2>/dev/null | grep linux-headers | sed 's/linux-headers-//' | head -1)"
+    if [[ -z "${kernel_ver}" ]]; then
+        echo -e "${WARNING} Cannot detect kernel version from headers deb — skipping FBS module"
+        rm -rf "${host_headers}"
+        return
+    fi
+    local headers_dir="${host_headers}/usr/src/linux-headers-${kernel_ver}"
+    echo -e "${INFO} Target kernel: ${kernel_ver}"
+
+    # ── Install cross-compiler if missing ──
+    if ! command -v aarch64-linux-gnu-gcc &>/dev/null; then
+        echo -e "${INFO} Installing aarch64 cross-compiler..."
+        echo "deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/20240801T000000Z noble main universe" \
+          >> /etc/apt/sources.list
+
+        apt update
+        apt-get install -y gcc-aarch64-linux-gnu=13.3.0-6ubuntu2~24.04 2>/dev/null
+    fi
+
+    cp "${tmp_fnnas}/boot/config-*" "${headers_dir}/.config"
+
+    # ── Rebuild all host scripts natively (make scripts) ──
+    # The headers deb ships scripts/mod/modpost, scripts/basic/fixdep, etc.
+    # compiled for arm64. Since the Actions runner is x86_64 (Ubuntu 24.04),
+    # these binaries can't execute. "make scripts HOSTCC=gcc" recompiles every
+    # tool in scripts/{basic,mod,dtc,...} from their source files, which are
+    # all present in the headers package (including scripts/include/xalloc.h).
+    echo -e "${INFO} Rebuilding host scripts..."
+    make -C "${headers_dir}" scripts HOSTCC=gcc 2>&1
+
+    # ── Use a private build dir so the module source stays clean ──
+    local build_dir
+    build_dir="$(mktemp -d /tmp/fnnas-modbuild-XXXXXX)"
+    cp -f "${module_src}/ahci_dwc_fbs.c" "${module_src}/ahci.h" \
+          "${module_src}/Makefile" "${build_dir}/"
+
+    echo -e "${INFO} Cross-compiling module..."
+    make -C "${headers_dir}" M="${build_dir}" \
+        ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+        modules
+
+    if [[ ! -f "${build_dir}/ahci_dwc_fbs.ko" ]]; then
+        echo -e "${WARNING} ahci_dwc_fbs.ko build failed — FBS module will not be included"
+        rm -rf "${host_headers}" "${build_dir}"
+        return
+    fi
+    echo -e "${SUCCESS} ahci_dwc_fbs.ko built ($(du -h "${build_dir}/ahci_dwc_fbs.ko" | cut -f1))"
+
+    # ── Inject .ko into the mounted image ──
+    local mod_install_dir="${tmp_fnnas}/lib/modules/${kernel_ver}/extra"
+    mkdir -p "${mod_install_dir}"
+    install -m 644 "${build_dir}/ahci_dwc_fbs.ko" "${mod_install_dir}/ahci_dwc_fbs.ko"
+    echo -e "${INFO} Installed to ${mod_install_dir}/ahci_dwc_fbs.ko"
+
+    # ── Set up automatic loading (done on host, before chroot & initramfs) ──
+    echo "ahci_dwc_fbs" > "${tmp_fnnas}/etc/modules-load.d/ahci-dwc-fbs.conf"
+    local initramfs_modules="${tmp_fnnas}/etc/initramfs-tools/modules"
+    if [[ -f "${initramfs_modules}" ]]; then
+        grep -q "ahci_dwc_fbs" "${initramfs_modules}" ||
+            echo "ahci_dwc_fbs" >> "${initramfs_modules}"
+    fi
+
+    rm -rf "${host_headers}" "${build_dir}"
+    echo -e "${SUCCESS} FBS module injected and autoload configured"
+}
+
+# ──────────────────────────────────────────────────────────────────────────
+# Patch rk3568 SATA DTBs in the mounted image to use "snps,dwc-ahci-fbs".
+#
+# Why only "snps,dwc-ahci-fbs" (no "snps,dwc-ahci" fallback):
+#   The built-in ahci_dwc driver claims devices matching "snps,dwc-ahci"
+#   during early device_initcall before any loadable module can run.
+#   Removing the fallback causes probe deferral so our module wins.
+# ──────────────────────────────────────────────────────────────────────────
+patch_sata_dtbs_host() {
+    echo -e "${STEPS} Patching rk35xx SATA DTBs on host..."
+
+    # Guard: only patch if the FBS module was actually installed.
+    # Without the .ko, patching the DTB would break SATA entirely because
+    # "snps,dwc-ahci-fbs" has no driver to match it (built-in uses "snps,dwc-ahci").
+    local ko_path
+    ko_path="$(find "${tmp_fnnas}/lib/modules" -name "ahci_dwc_fbs.ko" 2>/dev/null | head -1)"
+    if [[ -z "${ko_path}" ]]; then
+        echo -e "${NOTE} ahci_dwc_fbs.ko not found in image — skipping DTB patch to avoid breaking SATA"
+        return
+    fi
+
+    if ! command -v dtc &>/dev/null; then
+        apt-get install -y device-tree-compiler 2>/dev/null || {
+            echo -e "${WARNING} dtc not available — skipping DTB patch"
+            return
+        }
+    fi
+
+    local dtb_dir="${tmp_fnnas}/boot/dtb"
+    if [[ ! -d "${dtb_dir}" ]]; then
+        echo -e "${WARNING} DTB directory not found: ${dtb_dir}"
+        return
+    fi
+
+    local patched=0
+    local tmp_dts
+    tmp_dts="$(mktemp /tmp/fnnas-dts-XXXXXX.dts)"
+
+    for dtb in "${dtb_dir}"/rk35*.dtb; do
+        [[ -f "${dtb}" ]] || continue
+
+        dtc -q -I dtb -O dts "${dtb}" -o "${tmp_dts}" 2>/dev/null || continue
+        grep -q '"snps,dwc-ahci"' "${tmp_dts}" || continue
+
+        sed -i \
+            -e 's/compatible = "snps,dwc-ahci-fbs", "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g' \
+            -e 's/compatible = "rockchip,rk3568-dwc-ahci", "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g' \
+            -e 's/compatible = "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g' \
+            "${tmp_dts}"
+
+        if dtc -q -I dts -O dtb "${tmp_dts}" -o "${dtb}" 2>/dev/null; then
+            echo -e "${INFO} Patched: ${dtb##*/}"
+            ((patched++))
+        else
+            echo -e "${WARNING} Recompile failed for ${dtb##*/}"
+        fi
+    done
+
+    rm -f "${tmp_dts}"
+    [[ "${patched}" -gt 0 ]] \
+        && echo -e "${SUCCESS} ${patched} DTB(s) patched for FBS driver binding" \
+        || echo -e "${WARNING} No matching rk35xx DTBs found in ${dtb_dir}"
 }
 
 #================================== Main Execution ==================================
