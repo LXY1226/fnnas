@@ -13,12 +13,15 @@ on:
       fnnas_base_version:
         description: "Select fnnas base image version"
         required: false
-        default: "amlogic_693"
+        default: "rockchip_1253"
         type: choice
         options:
-          - allwinner_691
+          - amlogic_1252
           - amlogic_693
+          - rockchip_1253
           - rockchip_692
+          - allwinner_1254
+          - allwinner_691
       debs_repo:
         description: "Set fnnas debs repository"
         required: false
@@ -36,9 +39,10 @@ on:
       dtbs_version:
         description: "Set kernel dtbs version"
         required: false
-        default: "6.12.y"
+        default: "6.18.y"
         type: choice
         options:
+          - 6.18.y
           - 6.12.y
       dtbs_install:
         description: "Install kernel dtbs files"
