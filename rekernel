@@ -581,7 +581,7 @@ patch_sata_dtbs_host() {
         [[ -f "${dtb}" ]] || continue
 
         dtc -q -I dtb -O dts "${dtb}" -o "${tmp_dts}" 2>/dev/null || continue
-        echo -e "${STEPS} Patching DTBs... ${dtb}"
+#        echo -e "${STEPS} Patching DTBs... ${dtb}"
         grep -q 'snps,dwc-ahci"' "${tmp_dts}" || continue
 
         sed -i \
