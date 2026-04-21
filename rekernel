@@ -547,7 +547,6 @@ install_fbs_module_host() {
 }
 
 patch_sata_dtbs_host() {
-    echo -e "${STEPS} Patching rk35xx SATA DTBs on host..."
 
     # Guard: only patch if the FBS module was actually installed.
     # Without the .ko, patching the DTB would break SATA entirely because
@@ -568,6 +567,7 @@ patch_sata_dtbs_host() {
     fi
 
     local dtb_dir="${tmp_fnnas}/boot/dtb"
+    echo -e "${STEPS} Patching rk35xx SATA DTBs on host... ${dtb_dir}"
     if [[ ! -d "${dtb_dir}" ]]; then
         echo -e "${WARNING} DTB directory not found: ${dtb_dir}"
         return
@@ -577,7 +577,9 @@ patch_sata_dtbs_host() {
     local tmp_dts
     tmp_dts="$(mktemp /tmp/fnnas-dts-XXXXXX.dts)"
 
-    for dtb in $(find "${dtb_dir}" -name rk35*.dtb); do
+#    find "${dtb_dir}" -name *.dtb
+
+    for dtb in $(find "${dtb_dir}" -name *.dtb); do
         [[ -f "${dtb}" ]] || continue
 
         dtc -q -I dtb -O dts "${dtb}" -o "${tmp_dts}" 2>/dev/null || continue
