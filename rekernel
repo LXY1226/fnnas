@@ -482,50 +482,79 @@ clean_tmp() {
 
 
 # Install the pre-built ahci_dwc_fbs.ko (committed to repo) into the
-# mounted image. The .ko is cross-compiled locally and stored at
-# ahci-fbs-module/ahci_dwc_fbs.ko; no host-side compilation needed.
-# ──────────────────────────────────────────────────────────────────────────
+# mounted image. Pre-built binaries are stored as versioned .ko.xz files:
+#   ahci-fbs-module/ahci_dwc_fbs-<VERSION>-trim.ko.xz
+# The best match for the image's kernel minor version (e.g. 6.12) is
+# selected automatically. No host-side compilation is required.
 install_fbs_module_host() {
-    local ko_src="${current_path}/ahci-fbs-module/ahci_dwc_fbs.ko.gz"
-    if [[ ! -f "${ko_src}" ]]; then
-        echo -e "${WARNING} ahci-fbs-module/ahci_dwc_fbs.ko not found — skipping FBS module"
-        return
-    fi
-
-    gunzip "${current_path}/ahci-fbs-module/ahci_dwc_fbs.ko.gz"
-    ko_src="${current_path}/ahci-fbs-module/ahci_dwc_fbs.ko"
-
-    # Detect kernel version from the mounted image's modules directory
+    # Detect kernel version from the mounted image's modules directory.
+    # Modern Debian/Ubuntu store modules under /usr/lib/modules; older or
+    # minimal images use /lib/modules (often a symlink). Check both.
     local kernel_ver
-    kernel_ver="$(ls "${tmp_fnnas}/lib/modules/" 2>/dev/null | sort -V | tail -1)"
+    kernel_ver="$(ls "${tmp_fnnas}/usr/lib/modules/" 2>/dev/null | sort -V | tail -1)"
+    [[ -z "${kernel_ver}" ]] && \
+        kernel_ver="$(ls "${tmp_fnnas}/lib/modules/" 2>/dev/null | sort -V | tail -1)"
     if [[ -z "${kernel_ver}" ]]; then
         echo -e "${WARNING} Cannot detect kernel version from mounted image — skipping FBS module"
         return
     fi
-    echo -e "${INFO} Installing ahci_dwc_fbs.ko for kernel ${kernel_ver}..."
 
-    # Install .ko into the modules tree
-    local mod_dir="${tmp_fnnas}/lib/modules/${kernel_ver}/extra"
+    # Derive the minor version string (e.g. "6.12" from "6.12.41-ophub")
+    # and find the best-matching pre-built .ko.xz file.
+    local kver_minor
+    kver_minor="$(echo "${kernel_ver}" | grep -oP '^\d+\.\d+')"
+    local ko_xz
+    ko_xz="$(ls "${current_path}/ahci-fbs-module/ahci_dwc_fbs-${kver_minor}"*.ko.xz 2>/dev/null \
+             | sort -V | tail -1)"
+    if [[ -z "${ko_xz}" ]]; then
+        echo -e "${WARNING} No pre-built ahci_dwc_fbs.ko.xz for kernel ${kver_minor}.x in ahci-fbs-module/ — skipping"
+        return
+    fi
+    echo -e "${INFO} Installing ahci_dwc_fbs.ko for kernel ${kernel_ver} (from ${ko_xz##*/})..."
+
+    # Decompress to a temp file — leaves the repo .ko.xz intact.
+    local ko_tmp
+    ko_tmp="$(mktemp /tmp/ahci_dwc_fbs-XXXXXX.ko)"
+    if ! xz -dk "${ko_xz}" --stdout > "${ko_tmp}" 2>/dev/null; then
+        echo -e "${WARNING} Failed to decompress ${ko_xz##*/} — skipping FBS module"
+        rm -f "${ko_tmp}"
+        return
+    fi
+
+    # Resolve the correct module root (prefer /usr/lib/modules, fall back to /lib/modules).
+    local mod_root
+    if [[ -d "${tmp_fnnas}/usr/lib/modules/${kernel_ver}" ]]; then
+        mod_root="${tmp_fnnas}/usr/lib/modules/${kernel_ver}"
+    else
+        mod_root="${tmp_fnnas}/lib/modules/${kernel_ver}"
+    fi
+    local mod_dir="${mod_root}/extra"
     mkdir -p "${mod_dir}"
-    install -m 644 "${ko_src}" "${mod_dir}/ahci_dwc_fbs.ko"
+    install -m 644 "${ko_tmp}" "${mod_dir}/ahci_dwc_fbs.ko"
+    rm -f "${ko_tmp}"
     echo -e "${SUCCESS} Installed $(du -h "${mod_dir}/ahci_dwc_fbs.ko" | cut -f1) → ${mod_dir}/"
 
-    # Auto-load: modules-load.d (user-space) + initramfs-tools (initrd)
+    # Auto-load at boot: modules-load.d (user-space systemd path).
+    mkdir -p "${tmp_fnnas}/etc/modules-load.d"
     echo "ahci_dwc_fbs" > "${tmp_fnnas}/etc/modules-load.d/ahci-dwc-fbs.conf"
+
+    # Include in initrd: add to initramfs-tools/modules so the module is
+    # pulled into the initramfs during update-initramfs inside chroot.
     local itf="${tmp_fnnas}/etc/initramfs-tools/modules"
-    [[ -f "${itf}" ]] && grep -q "ahci_dwc_fbs" "${itf}" ||
-        echo "ahci_dwc_fbs" >> "${itf}"
-    echo -e "${INFO} Autoload configured"
+    mkdir -p "$(dirname "${itf}")"
+    grep -q "ahci_dwc_fbs" "${itf}" 2>/dev/null || echo "ahci_dwc_fbs" >> "${itf}"
+    echo -e "${INFO} Autoload configured (modules-load.d + initramfs-tools/modules)"
 }
 
 patch_sata_dtbs_host() {
-    echo -e "${STEPS} Patching rk3568 SATA DTBs on host..."
+    echo -e "${STEPS} Patching rk35xx SATA DTBs on host..."
 
     # Guard: only patch if the FBS module was actually installed.
     # Without the .ko, patching the DTB would break SATA entirely because
     # "snps,dwc-ahci-fbs" has no driver to match it (built-in uses "snps,dwc-ahci").
     local ko_path
-    ko_path="$(find "${tmp_fnnas}/lib/modules" -name "ahci_dwc_fbs.ko" 2>/dev/null | head -1)"
+    ko_path="$(find "${tmp_fnnas}/usr/lib/modules" "${tmp_fnnas}/lib/modules" \
+               -name "ahci_dwc_fbs.ko" 2>/dev/null | head -1)"
     if [[ -z "${ko_path}" ]]; then
         echo -e "${NOTE} ahci_dwc_fbs.ko not found in image — skipping DTB patch to avoid breaking SATA"
         return
@@ -538,8 +567,6 @@ patch_sata_dtbs_host() {
         }
     fi
 
-    find ${tmp_fnnas}/boot/
-
     local dtb_dir="${tmp_fnnas}/boot/dtb"
     if [[ ! -d "${dtb_dir}" ]]; then
         echo -e "${WARNING} DTB directory not found: ${dtb_dir}"
@@ -550,7 +577,7 @@ patch_sata_dtbs_host() {
     local tmp_dts
     tmp_dts="$(mktemp /tmp/fnnas-dts-XXXXXX.dts)"
 
-    for dtb in "${dtb_dir}"/rk35*.dtb; do
+    for dtb in $(find "${dtb_dir}" -name rk35*.dtb); do
         [[ -f "${dtb}" ]] || continue
 
         dtc -q -I dtb -O dts "${dtb}" -o "${tmp_dts}" 2>/dev/null || continue

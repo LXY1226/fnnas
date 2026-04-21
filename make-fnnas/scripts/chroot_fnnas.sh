@@ -36,6 +36,7 @@ STEPS="[\033[95m STEPS \033[0m]"
 INFO="[\033[94m INFO \033[0m]"
 SUCCESS="[\033[92m SUCCESS \033[0m]"
 WARNING="[\033[93m WARNING \033[0m]"
+NOTE="[\033[93m NOTE \033[0m]"
 ERROR="[\033[91m ERROR \033[0m]"
 
 #==========================================================================
@@ -199,18 +200,19 @@ generate_uinitrd() {
 }
 
 # Run depmod inside chroot for the FBS module pre-installed by the host build step.
-# The .ko was already injected into /lib/modules/<ver>/extra/ before chroot ran;
-# we only need depmod to update modules.dep so the initramfs generator and
+# The .ko was already injected into /usr/lib/modules/<ver>/extra/ (or /lib/modules/<ver>/extra/)
+# before chroot ran; we only need depmod to update modules.dep so the initramfs generator and
 # modprobe can find it. autoload and initramfs-tools/modules were also set by host.
 run_depmod_for_fbs() {
     local ko_path
-    ko_path="$(find /lib/modules -name "ahci_dwc_fbs.ko" 2>/dev/null | head -1)"
+    # Modern Debian/Ubuntu keep modules under /usr/lib/modules; /lib/modules is often a symlink.
+    ko_path="$(find /usr/lib/modules /lib/modules -name "ahci_dwc_fbs.ko" 2>/dev/null | head -1)"
     if [[ -z "${ko_path}" ]]; then
-        echo -e "${NOTE} ahci_dwc_fbs.ko not found — FBS module was not built on host"
+        echo -e "${NOTE} ahci_dwc_fbs.ko not found — FBS module was not installed by host"
         return
     fi
     local kernel_ver
-    kernel_ver="$(echo "${ko_path}" | awk -F'/' '{print $4}')"
+    kernel_ver="$(echo "${ko_path}" | grep -oP '(?<=/modules/)[^/]+')"
     echo -e "${INFO} Running depmod for FBS module (kernel ${kernel_ver})..."
     depmod -a "${kernel_ver}"
     echo -e "${SUCCESS} depmod complete — ahci_dwc_fbs.ko is registered"
