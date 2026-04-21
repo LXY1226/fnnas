@@ -219,10 +219,9 @@ build_ahci_fbs_module() {
     }
     local kernel_ver
     kernel_ver="$(basename "${headers_dir}" | sed 's/linux-headers-//')"
+    make -C "${headers_dir}" scripts HOSTCC=gcc
     echo -e "${INFO} Building against headers: ${headers_dir} (${kernel_ver})"
 
-    # Install build tools (gcc/make may already be present)
-    apt-get install -y gcc make 2>/dev/null
 
     cd "${module_src}"
     # Use -C to point to the exact headers dir; M= is our source tree.
@@ -271,7 +270,7 @@ patch_sata_dtbs() {
         return
     fi
 
-    local dtb_dir="/boot/dtb/rockchip"
+    local dtb_dir="/boot/dtb"
     local patched=0
 
     for dtb in "${dtb_dir}"/rk35*.dtb; do
