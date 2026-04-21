@@ -577,18 +577,15 @@ patch_sata_dtbs_host() {
     local tmp_dts
     tmp_dts="$(mktemp /tmp/fnnas-dts-XXXXXX.dts)"
 
-#    find "${dtb_dir}" -name *.dtb
-
-    for dtb in $(find "${dtb_dir}" -name *.dtb); do
+    for dtb in $(find "${dtb_dir}" -name rk35*.dtb); do
         [[ -f "${dtb}" ]] || continue
 
         dtc -q -I dtb -O dts "${dtb}" -o "${tmp_dts}" 2>/dev/null || continue
-        grep -q '"snps,dwc-ahci"' "${tmp_dts}" || continue
+        echo -e "${STEPS} Patching DTBs... ${dtb}"
+        grep -q 'snps,dwc-ahci"' "${tmp_dts}" || continue
 
         sed -i \
-            -e 's/compatible = "snps,dwc-ahci-fbs", "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g' \
-            -e 's/compatible = "rockchip,rk3568-dwc-ahci", "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g' \
-            -e 's/compatible = "snps,dwc-ahci"/compatible = "snps,dwc-ahci-fbs"/g' \
+            -e 's/snps,dwc-ahci"/snps,dwc-ahci-fbs"/g' \
             "${tmp_dts}"
 
         if dtc -q -I dts -O dtb "${tmp_dts}" -o "${dtb}" 2>/dev/null; then
