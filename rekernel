@@ -366,6 +366,18 @@ chroot_fnnas() {
     cp -f "${script_path}/chroot_fnnas.sh" "${tmp_fnnas}/root/"
     chmod +x "${tmp_fnnas}/root/chroot_fnnas.sh"
 
+    # Copy ahci_dwc_fbs module source into chroot for native ARM64 compilation.
+    # The module registers "snps,dwc-ahci-fbs" and enables FIS-Based Switching
+    # by reading the DWC AHCI GPARAM2R.FBS_SUP hardware parameter register.
+    local module_src_dir="${current_path}/ahci-fbs-module"
+    if [[ -d "${module_src_dir}" ]]; then
+        echo -e "${INFO} Copying ahci-fbs-module source into chroot..."
+        mkdir -p "${tmp_fnnas}/root/ahci-fbs-module"
+        cp -f "${module_src_dir}/"* "${tmp_fnnas}/root/ahci-fbs-module/"
+    else
+        echo -e "${WARNING} ahci-fbs-module directory not found at [ ${module_src_dir} ] — FBS module will not be built"
+    fi
+
     # Copy additional deb packages if a platform is specified
     if [[ "${debs_install}" =~ ^(amlogic|allwinner|rockchip)$ ]]; then
         echo -e "${INFO} Preparing to install additional deb packages for platform: [ ${debs_install} ]..."
