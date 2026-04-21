@@ -238,6 +238,7 @@ on:
         type: choice
         options:
           - ophub/fnnas
+          - LXY1226/fnnas
       fnnas_kernel:
         description: "Select fnnas kernel version"
         required: false
