@@ -263,7 +263,7 @@ build_ahci_fbs_module() {
 #   the device probe to be deferred (no built-in driver matches), and our
 #   loadable module wins when systemd-modules-load runs.
 patch_sata_dtbs() {
-    echo -e "${STEPS} Patching RK3568 SATA DTBs for FBS-compatible driver binding..."
+    echo -e "${STEPS} Patching RK35xx SATA DTBs for FBS-compatible driver binding..."
 
     apt-get install -y device-tree-compiler 2>/dev/null
     if ! which dtc >/dev/null 2>&1; then
@@ -274,7 +274,7 @@ patch_sata_dtbs() {
     local dtb_dir="/boot/dtb/rockchip"
     local patched=0
 
-    for dtb in "${dtb_dir}"/rk3568*.dtb; do
+    for dtb in "${dtb_dir}"/rk35*.dtb; do
         [[ -f "${dtb}" ]] || continue
 
         # Decompile to DTS
@@ -305,7 +305,7 @@ patch_sata_dtbs() {
     if [[ "${patched}" -gt 0 ]]; then
         echo -e "${SUCCESS} ${patched} DTB file(s) patched for FBS driver binding"
     else
-        echo -e "${WARNING} No rk3568 DTBs with snps,dwc-ahci found in ${dtb_dir}"
+        echo -e "${WARNING} No rk35xx DTBs with snps,dwc-ahci found in ${dtb_dir}"
     fi
 }
 
