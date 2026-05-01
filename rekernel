@@ -89,19 +89,18 @@ mount_try() {
         error_msg "Missing mount parameters: [ ${m_dev}, ${m_target} ]"
     }
 
-    local t="1"
-    local max_try="10"
+    local t=1
+    local max_try=10
     while [[ "${t}" -le "${max_try}" ]]; do
-        mount "${m_dev}" "${m_target}"
-        if [[ "${?}" -eq "0" ]]; then
-            break
-        else
-            sync && sleep 3
-            umount "${m_target}" 2>/dev/null
-            ((t++))
+        if mount "${m_dev}" "${m_target}"; then
+            return 0
         fi
+        sync && sleep 3
+        # Lazy unmount in case the previous attempt left a stale mount.
+        umount -l "${m_target}" 2>/dev/null || true
+        ((t++))
     done
-    [[ "${t}" -gt "${max_try}" ]] && error_msg "Failed to mount after [ ${t} ] attempts."
+    error_msg "Failed to mount [ ${m_dev} ] on [ ${m_target} ] after [ ${max_try} ] attempts."
 }
 
 init_var() {
@@ -188,16 +187,20 @@ download_debs() {
 
     # Download the kernel deb packages (retry up to 10 times on failure)
     echo -e "${INFO} Downloading kernel deb packages from: [ ${debs_down_from} ]"
+    local _curl_ok=0
     for t in {1..10}; do
-        curl -fsSL "${debs_down_from}" -o "${tmp_debs_path}/${latest_version}.tar.gz"
-        [[ "${?}" -eq 0 ]] && break || sleep 60
+        if curl -fsSL "${debs_down_from}" -o "${tmp_debs_path}/${latest_version}.tar.gz"; then
+            _curl_ok=1
+            break
+        fi
+        sleep 60
     done
-    [[ "${?}" -eq 0 ]] || error_msg "Failed to download kernel deb packages from github.com."
+    [[ "${_curl_ok}" -eq 1 ]] || error_msg "Failed to download kernel deb packages from github.com."
 
     # Extract the downloaded deb packages
     echo -e "${INFO} Extracting kernel deb packages..."
-    tar -xzf "${tmp_debs_path}/${latest_version}.tar.gz" -C "${fnnas_debs}/"
-    [[ "${?}" -ne 0 ]] && error_msg "Failed to extract kernel deb packages."
+    tar -xzf "${tmp_debs_path}/${latest_version}.tar.gz" -C "${fnnas_debs}/" ||
+        error_msg "Failed to extract kernel deb packages."
     echo -e "${INFO} Kernel deb packages extracted to [ ${fnnas_debs} ]"
 
     # Cleanup temporary download directory
@@ -239,22 +242,26 @@ download_dtbs() {
 
     # Download the kernel DTB files (retry up to 10 times on failure)
     echo -e "${INFO} Downloading kernel DTB files from: [ ${dtbs_down_from} ]"
+    local _curl_ok=0
     for t in {1..10}; do
-        curl -fsSL "${dtbs_down_from}" -o "${tmp_dtbs_path}/${latest_version}.tar.gz"
-        [[ "${?}" -eq 0 ]] && break || sleep 60
+        if curl -fsSL "${dtbs_down_from}" -o "${tmp_dtbs_path}/${latest_version}.tar.gz"; then
+            _curl_ok=1
+            break
+        fi
+        sleep 60
     done
-    [[ "${?}" -eq 0 ]] || error_msg "Failed to download kernel DTB files from github.com."
+    [[ "${_curl_ok}" -eq 1 ]] || error_msg "Failed to download kernel DTB files from github.com."
 
     # Extract the downloaded DTB files
     echo -e "${INFO} Extracting kernel DTB files..."
-    tar -xzf "${tmp_dtbs_path}/${latest_version}.tar.gz" -C "${tmp_dtbs_path}/"
-    [[ "${?}" -ne 0 ]] && error_msg "Failed to extract kernel DTB files."
+    tar -xzf "${tmp_dtbs_path}/${latest_version}.tar.gz" -C "${tmp_dtbs_path}/" ||
+        error_msg "Failed to extract kernel DTB files."
     echo -e "${INFO} Kernel DTB files extracted to [ ${tmp_dtbs_path} ]"
 
     # Extract individual platform dtbs
-    tar -xzf ${tmp_dtbs_path}/${latest_version}/dtb-amlogic-${latest_version}*.tar.gz -C "${tmp_dtbs_path}/amlogic/"
-    tar -xzf ${tmp_dtbs_path}/${latest_version}/dtb-allwinner-${latest_version}*.tar.gz -C "${tmp_dtbs_path}/allwinner/"
-    tar -xzf ${tmp_dtbs_path}/${latest_version}/dtb-rockchip-${latest_version}*.tar.gz -C "${tmp_dtbs_path}/rockchip/"
+    tar -xzf "${tmp_dtbs_path}/${latest_version}"/dtb-amlogic-${latest_version}*.tar.gz -C "${tmp_dtbs_path}/amlogic/"
+    tar -xzf "${tmp_dtbs_path}/${latest_version}"/dtb-allwinner-${latest_version}*.tar.gz -C "${tmp_dtbs_path}/allwinner/"
+    tar -xzf "${tmp_dtbs_path}/${latest_version}"/dtb-rockchip-${latest_version}*.tar.gz -C "${tmp_dtbs_path}/rockchip/"
     cp -af "${tmp_dtbs_path}"/{allwinner,amlogic,rockchip} "${fnnas_dtbs}/"
     echo -e "${INFO} Kernel DTB files organized to [ ${fnnas_dtbs} ]"
 
@@ -326,9 +333,9 @@ unmount_fnnas() {
     fi
 
     # Cleanup temp directory
-    rm -f ${tmp_fnnas}/root/chroot_fnnas.sh
-    rm -f ${tmp_fnnas}/root/*.deb
-    rm -rf ${tmp_path}
+    rm -f "${tmp_fnnas}/root/chroot_fnnas.sh"
+    rm -f "${tmp_fnnas}/root/"*.deb
+    [[ -n "${tmp_path}" ]] && rm -rf "${tmp_path}"
     echo -e "${INFO} Temporary files cleaned up."
 
     sync && sleep 3
@@ -466,7 +473,7 @@ chroot_fnnas() {
 
     # Final packaging
     cd "${current_path}"
-    rm -f ${out_path}/${kernel_out}.tar.gz
+    rm -f "${out_path}/${kernel_out}.tar.gz"
     tar -czf "${out_path}/${kernel_out}.tar.gz" -C "${out_path}" "${kernel_out}"
     rm -rf "${out_path}/${kernel_out}"
 }

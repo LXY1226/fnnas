@@ -116,6 +116,12 @@ runs:
         [[ "${down_file:0-4}" == ".zip" ]] && unzip -o ${down_file} 2>/dev/null && sync
         echo -e "FnNAS image files after decompression: \n$(ls -lh *.img 2>/dev/null)"
 
+        # Set builder custom signature
+        [[ -n "${{ inputs.builder_name }}" ]] && {
+            builder_name="${{ inputs.builder_name }}"
+            builder_name="${builder_name// /-}"
+        }
+
         if [[ "${build_target}" == "fnnas" ]]; then
             echo -e "Starting FnNAS system rebuild..."
 
@@ -128,7 +134,7 @@ runs:
             [[ -n "${{ inputs.auto_kernel }}" ]] && make_command="${make_command} -a ${{ inputs.auto_kernel }}"
             [[ -n "${{ inputs.fnnas_size }}" ]] && make_command="${make_command} -s ${{ inputs.fnnas_size }}"
             [[ -n "${{ inputs.rootfs_expand }}" ]] && make_command="${make_command} -e ${{ inputs.rootfs_expand }}"
-            [[ -n "${{ inputs.builder_name }}" ]] && make_command="${make_command} -n ${{ inputs.builder_name }}"
+            [[ -n "${builder_name}" ]] && make_command="${make_command} -n ${builder_name}"
             read -r -a make_args <<< "${make_command}"
             sudo ./renas "${make_args[@]}"
 
